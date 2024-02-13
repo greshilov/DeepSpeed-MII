@@ -148,7 +148,7 @@ def pipeline(model_config, expected_failure):
 
 
 @pytest.fixture(scope="function")
-def deployment(mii_config, expected_failure):
+def deployment(event_loop, mii_config, expected_failure):
     if expected_failure is not None:
         with pytest.raises(expected_failure) as excinfo:
             mii.serve(mii_config=mii_config)

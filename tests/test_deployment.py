@@ -18,6 +18,12 @@ def test_single_gpu(deployment, query):
     assert outputs[0], "output is empty"
 
 
+@pytest.mark.asyncio
+async def test_single_gpu_async(deployment, query):
+    outputs = await deployment.agenerate(query)
+    assert outputs[0], "output is empty"
+
+
 def test_streaming(deployment, query):
     outputs = []
 
@@ -25,6 +31,15 @@ def test_streaming(deployment, query):
         outputs.append(response[0].generated_text)
 
     deployment(query, streaming_fn=callback)
+    assert outputs, "output is empty"
+
+
+@pytest.mark.asyncio
+async def test_streaming_async(deployment, query):
+    outputs = []
+    async for response in deployment.agenerate(query, stream=True):
+        outputs.append(response)
+
     assert outputs, "output is empty"
 
 

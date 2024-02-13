@@ -5,13 +5,15 @@
 import asyncio
 import grpc
 import requests
-from typing import Dict, Any, Callable, List, Union
+from typing import Awaitable, AsyncGenerator, Dict, Any, Callable, List, Union
 
 from mii.batching.data_classes import Response
 from mii.config import MIIConfig
 from mii.constants import GRPC_MAX_MSG_SIZE
 from mii.grpc_related.proto import modelresponse_pb2, modelresponse_pb2_grpc
 from mii.grpc_related.task_methods import TASK_METHODS_DICT
+
+MiiClientResponse = Union[None, List[Response]]
 
 
 def create_channel(host, port):
@@ -41,58 +43,74 @@ class MIIClient:
     def __call__(self, *args, **kwargs) -> List[Response]:
         return self.generate(*args, **kwargs)
 
-    async def _request_async_response(self, prompts, **query_kwargs):
+    async def _request_async_response(
+            self,
+            prompts: Union[str,
+                           List[str]],
+            **query_kwargs: Dict[str,
+                                 Any]) -> Awaitable[MiiClientResponse]:
         task_methods = TASK_METHODS_DICT[self.task]
         proto_request = task_methods.pack_request_to_proto(prompts, **query_kwargs)
+
         proto_response = await getattr(self.stub, task_methods.method)(proto_request)
         return task_methods.unpack_response_from_proto(proto_response)
 
-    async def _request_async_response_stream(self, prompts, **query_kwargs):
+    async def _request_async_response_stream(
+            self,
+            prompts: Union[str,
+                           List[str]],
+            **query_kwargs: Dict[str,
+                                 Any]) -> AsyncGenerator[MiiClientResponse,
+                                                         None]:
+
+        if len(prompts) > 1:
+            raise RuntimeError(
+                "MII client streaming only supports a single prompt input.")
+
         task_methods = TASK_METHODS_DICT[self.task]
         proto_request = task_methods.pack_request_to_proto(prompts, **query_kwargs)
+
         assert hasattr(task_methods, "method_stream_out"), f"{self.task} does not support streaming response"
         async for response in getattr(self.stub,
                                       task_methods.method_stream_out)(proto_request):
             yield task_methods.unpack_response_from_proto(response)
+
+    def agenerate(
+        self,
+        prompts: Union[str,
+                       List[str]],
+        **query_kwargs: Dict[str,
+                             Any]
+    ) -> Union[Awaitable[MiiClientResponse],
+               AsyncGenerator[MiiClientResponse,
+                              None]]:
+
+        if isinstance(prompts, str):
+            prompts = [prompts]
+
+        if query_kwargs.get("stream", False):
+            return self._request_async_response_stream(prompts, **query_kwargs)
+
+        return self._request_async_response(prompts, **query_kwargs)
 
     def generate(self,
                  prompts: Union[str,
                                 List[str]],
                  streaming_fn: Callable = None,
                  **query_kwargs: Dict[str,
-                                      Any]) -> Union[None,
-                                                     List[Response]]:
-        if isinstance(prompts, str):
-            prompts = [prompts]
+                                      Any]) -> MiiClientResponse:
         if streaming_fn is not None:
-            if len(prompts) > 1:
-                raise RuntimeError(
-                    "MII client streaming only supports a single prompt input.")
             query_kwargs["stream"] = True
-            return self._generate_stream(streaming_fn, prompts, **query_kwargs)
+
+            async def read_stream():
+                async for response in self.agenerate(prompts, **query_kwargs):
+                    streaming_fn(response)
+
+            return self.asyncio_loop.run_until_complete(read_stream())
 
         return self.asyncio_loop.run_until_complete(
-            self._request_async_response(prompts,
-                                         **query_kwargs))
-
-    def _generate_stream(self,
-                         callback,
-                         prompts: List[str],
-                         **query_kwargs: Dict[str,
-                                              Any]) -> None:
-        async def put_result():
-            response_stream = self._request_async_response_stream(
-                prompts,
-                **query_kwargs)
-
-            while True:
-                try:
-                    response = await response_stream.__anext__()
-                    callback(response)
-                except StopAsyncIteration:
-                    break
-
-        self.asyncio_loop.run_until_complete(put_result())
+            self.agenerate(prompts,
+                           **query_kwargs))
 
     async def terminate_async(self) -> None:
         await self.stub.Terminate(
